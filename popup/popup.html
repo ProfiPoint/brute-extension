@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FEL BRUTE Manager</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="popup-container">
+    <!-- Header -->
+    <header class="header">
+      <div class="header-brand">
+        <img src="../icons/brute48.png" alt="Logo" class="brand-icon">
+        <div class="brand-text">
+          <h1 class="brand-title">BRUTE Manager</h1>
+          <p class="brand-subtitle">FEL CTU Task &amp; Deadline Helper</p>
+        </div>
+      </div>
+      <span id="ext-version" class="version-badge">v1.2</span>
+    </header>
+
+    <!-- 1. Tracked Tasks Overview Section (First) -->
+    <section class="card stats-card">
+      <div class="card-header">
+        <span class="card-title">Tracked Tasks Overview</span>
+        <span id="total-tasks-badge" class="badge badge-neutral">0 tracked</span>
+      </div>
+      <div class="card-body">
+        <!-- Metric Grid (2x2) -->
+        <div class="metrics-grid">
+          <div class="metric-item metric-done">
+            <span class="metric-icon">✅</span>
+            <div class="metric-info">
+              <span class="metric-value" id="stat-done">0</span>
+              <span class="metric-label">Completed</span>
+            </div>
+          </div>
+
+          <div class="metric-item metric-todo">
+            <span class="metric-icon">⭐</span>
+            <div class="metric-info">
+              <span class="metric-value" id="stat-todo">0</span>
+              <span class="metric-label">To-Do</span>
+            </div>
+          </div>
+
+          <div class="metric-item metric-highlight">
+            <span class="metric-icon">🔎</span>
+            <div class="metric-info">
+              <span class="metric-value" id="stat-highlight">0</span>
+              <span class="metric-label">Highlight</span>
+            </div>
+          </div>
+
+          <div class="metric-item metric-cancel">
+            <span class="metric-icon">❌</span>
+            <div class="metric-info">
+              <span class="metric-value" id="stat-cancel">0</span>
+              <span class="metric-label">Cancelled</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 2. Plagiat Status Section (Second) -->
+    <section class="card plagiat-card" id="plagiat-card">
+      <div class="card-header">
+        <span class="card-title">Plagiat Incident Monitor</span>
+        <span id="plagiat-badge" class="badge badge-clean">Clean</span>
+      </div>
+      <div class="card-body">
+        <div id="plagiat-clean-view" class="status-box status-clean">
+          <span class="status-icon">🛡️</span>
+          <div class="status-text">
+            <strong>No Incidents Detected</strong>
+            <p>Status: Normal.</p>
+          </div>
+        </div>
+
+        <div id="plagiat-incident-view" class="status-box status-warning hidden">
+          <div class="warning-header">
+            <span class="warning-icon">⚠️</span>
+            <div class="warning-meta">
+              <strong id="plagiat-title">Plagiat incident detected</strong>
+              <p>Plagiat incident has been automatically hidden. Rip. At least you don't have to be forced to stare at it anymore...</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 3. Settings & Data Management Section -->
+    <section class="card settings-card">
+      <div class="card-header">
+        <span class="card-title">Settings &amp; Data</span>
+      </div>
+      <div class="card-body settings-body">
+        <!-- Category 1: Layout & Appearance -->
+        <div class="settings-group">
+          <div class="settings-group-title">🎨 Layout &amp; Appearance</div>
+
+          <!-- Classic BRUTE UI (Old Style & Layout) setting -->
+          <div class="setting-item">
+            <div class="setting-info">
+              <span class="setting-label">Classic BRUTE UI (Old Style)</span>
+              <span class="setting-desc">Restores classic CSS, colors &amp; element positions</span>
+            </div>
+            <label class="toggle-switch">
+              <input type="checkbox" id="toggle-classic-ui">
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+
+          <hr class="setting-divider">
+
+          <!-- Course summary to bottom setting -->
+          <div class="setting-item">
+            <div class="setting-info">
+              <span class="setting-label">Course summary to bottom</span>
+              <span class="setting-desc">Swaps Course summary below the tasks</span>
+            </div>
+            <label class="toggle-switch">
+              <input type="checkbox" id="toggle-summary-bottom">
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+
+          <hr class="setting-divider">
+
+          <!-- Green checkmarks in lists setting -->
+          <div class="setting-item">
+            <div class="setting-info">
+              <span class="setting-label">Green checkmarks in lists</span>
+              <span class="setting-desc">Adds ✅ before completed tasks in course lists</span>
+            </div>
+            <label class="toggle-switch">
+              <input type="checkbox" id="toggle-green-checkmarks" checked>
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+
+          <hr class="setting-divider">
+
+          <!-- Hide NEW badge setting -->
+          <div class="setting-item">
+            <div class="setting-info">
+              <span class="setting-label">Hide NEW task badges</span>
+              <span class="setting-desc">Hides the NEW label on newly discovered tasks</span>
+            </div>
+            <label class="toggle-switch">
+              <input type="checkbox" id="toggle-hide-new">
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+
+          <hr class="setting-divider">
+
+          <!-- Plagiat Auto-hide setting -->
+          <div class="setting-item">
+            <div class="setting-info">
+              <span class="setting-label">Auto-hide Plagiat Warning</span>
+              <span class="setting-desc">Hides banner from BRUTE navbar if present</span>
+            </div>
+            <label class="toggle-switch">
+              <input type="checkbox" id="toggle-hide-plagiat" checked>
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Category 2: Automatic Task Completion -->
+        <div class="settings-group">
+          <div class="settings-group-title">⚡ Automatic Task Completion</div>
+
+          <!-- Automatic completion detection setting -->
+          <div class="setting-item">
+            <div class="setting-info">
+              <span class="setting-label">Automatic completion detection</span>
+              <span class="setting-desc">Marks Course summary tasks completed at max score (or min if enabled)</span>
+            </div>
+            <label class="toggle-switch">
+              <input type="checkbox" id="toggle-auto-complete" checked>
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+
+          <hr class="setting-divider">
+
+          <!-- Complete & party on minimum accepted score setting -->
+          <div class="setting-item">
+            <div class="setting-info">
+              <span class="setting-label">Complete &amp; party on min accepted score</span>
+              <span class="setting-desc">Marks task completed &amp; triggers party when reaching required minimum points. If you want to just pass the courses and nothing more :)</span>
+            </div>
+            <label class="toggle-switch">
+              <input type="checkbox" id="toggle-party-min-score">
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+
+          <hr class="setting-divider">
+
+          <!-- Detect & auto-complete X's setting -->
+          <div class="setting-item">
+            <div class="setting-info">
+              <span class="setting-label">Detect &amp; auto-complete X's</span>
+              <span class="setting-desc">Marks task completed when red X badge disappears</span>
+            </div>
+            <label class="toggle-switch">
+              <input type="checkbox" id="toggle-auto-complete-x" checked>
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Category 3: Notifications & Party Mode -->
+        <div class="settings-group">
+          <div class="settings-group-title">🎉 Notifications &amp; Party Mode</div>
+
+          <!-- Toast notifications (Popups) setting -->
+          <div class="setting-item">
+            <div class="setting-info">
+              <span class="setting-label">Toast notifications (Popups)</span>
+              <span class="setting-desc">Shows bottom alerts for new tasks &amp; completions</span>
+            </div>
+            <label class="toggle-switch">
+              <input type="checkbox" id="toggle-completion-toast" checked>
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+
+          <hr class="setting-divider">
+
+          <!-- Party mode celebration (Max score) setting -->
+          <div class="setting-item">
+            <div class="setting-info">
+              <span class="setting-label">Party mode celebration</span>
+              <span class="setting-desc">Disco lights &amp; confetti when a task is completed</span>
+            </div>
+            <label class="toggle-switch">
+              <input type="checkbox" id="toggle-party-mode" checked>
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Category 4: Debug & Data Management -->
+        <div class="settings-group">
+          <div class="settings-group-title">🛠️ Debug &amp; Data Management</div>
+
+          <!-- Debug Simulate Party Mode button -->
+          <div class="debug-actions">
+            <button id="btn-simulate-party" class="btn btn-party btn-block" title="Simulates switching a random task in Course summary from XX to its maximum score">
+              🎉 Simulate Party - Task Completed
+            </button>
+          </div>
+
+          <div id="delete-initial-view" class="danger-actions">
+            <button id="btn-delete-all-init" class="btn btn-danger btn-block">
+              🗑️ Delete All Data / Reset
+            </button>
+          </div>
+
+          <div id="delete-confirm-view" class="confirm-box hidden">
+            <p class="confirm-text">⚠️ <strong>Reset all tasks and plagiat records?</strong> This cannot be undone.</p>
+            <div class="confirm-buttons">
+              <button id="btn-delete-cancel" class="btn btn-secondary btn-sm">Cancel</button>
+              <button id="btn-delete-confirm" class="btn btn-danger btn-sm">Yes, Delete All</button>
+            </div>
+          </div>
+
+          <div id="action-feedback" class="action-feedback hidden"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 4. Bug Report / Contact Footer -->
+    <footer class="popup-footer">
+      Found a bug? Email <a href="mailto:brute-extension@profipoint.pro" class="footer-link">brute-extension@profipoint.pro</a> or DM <span class="footer-discord">@profipoint</span> on Discord.
+    </footer>
+  </div>
+
+  <script src="../storage.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

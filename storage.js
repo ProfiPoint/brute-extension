@@ -1,11 +1,21 @@
 // ============================================================================
-// FEL CTU BRUTE Deadline Manager - Synced Chunked & Compressed Storage (v2)
+// FEL CTU BRUTE Deadline Manager - Synced Multi-Key Storage Engine (v1.29)
 // ============================================================================
-// Stores 100% of extension data in browser.storage.sync / chrome.storage.sync:
-// - Course-prefix deduplication (/brute/student/course/<courseId>/<taskSlug>)
-// - Unified bit-packed task state (seen + state + autoCompleteSource + dangerX)
-// - Automatic multi-key chunking (b_meta + b_c_0 .. b_c_N, max 6,500 bytes/item)
-// - Automatic backwards-compatible migration & purge of legacy sync/local data
+// Architecture designed for reliable native Chrome Sync & Firefox Sync,
+// including staggered multi-device updates and pre-sync offline edits:
+// 1. Clean-slate v1.28+ namespace (b128_*): removes obsolete pre-1.28 keys
+//    without writing blank state to storage.sync on install/update.
+// 2. Per-Course Sync Keys (b128_c_<COURSE>): each course's tasks are isolated
+//    in their own storage.sync key so editing Course A on an un-synced device
+//    never touches Course B, C, or D in the cloud.
+// 3. Local Shadow Backup Auto-Heal (b128_local_shadow in storage.local):
+//    every device keeps a local per-task timestamp journal in storage.local.
+//    If a freshly installed Firefox device overwrites a sync key before
+//    Firefox Sync finishes its initial pull, the other device automatically
+//    merges its local shadow backup with the cloud tasks by timestamp.
+// 4. Tombstones (0~<ts>) & Global Reset Timestamp (b128_meta.r):
+//    distinguishes intentional task resets / "Delete All Data" from pre-sync
+//    overwrites so deleted tasks are never accidentally resurrected.
 // ============================================================================
 
 (function (globalScope) {
@@ -19,19 +29,25 @@
     const syncArea = storageNamespace ? (storageNamespace.sync || storageNamespace.local) : null;
     const localArea = storageNamespace ? storageNamespace.local : null;
 
-    const META_KEY = 'b_meta';
-    const CHUNK_PREFIX = 'b_c_';
-    const MAX_CHUNK_CHARS = 6500; // Pure ASCII -> 6,500 bytes (well below 8,192 QUOTA_BYTES_PER_ITEM)
-    const SCHEMA_VERSION = 2;
+    const DB_VERSION = '1.29';
+    const KEY_PREFIX = 'b128_';
+    const META_KEY = 'b128_meta';
+    const SETTINGS_KEY = 'b128_settings';
+    const PLAGIAT_KEY = 'b128_plagiat';
+    const COURSE_KEY_PREFIX = 'b128_c_';
+    const TASK_CHUNK_PREFIX = 'b128_t_';
+    const SEEN_CHUNK_PREFIX = 'b128_s_';
+    const ONBOARDING_LOCAL_KEY = 'b128_onboarding_shown_v1';
+    const LOCAL_SHADOW_KEY = 'b128_local_shadow';
 
-    const LEGACY_KEYS = [
-        'bruteTasks',
-        'bruteSeenTasks',
-        'bruteAutoCompleted',
-        'bruteDangerTasks',
-        'bruteLastResetId',
-        'plagiatIncident',
-        'hidePlagiatBanner',
+    const MAX_CHUNK_CHARS = 6500;
+
+    const LEGACY_LS_KEYS = [
+        'brute_seen_tasks_v1',
+        'brute_last_reset_id_v1'
+    ];
+
+    const SETTING_KEYS = [
         'classicUiStyle',
         'courseSummaryToBottom',
         'autoDetectCompletion',
@@ -39,14 +55,9 @@
         'showCompletionToast',
         'showGreenCheckmarks',
         'hideNewTaskBadge',
+        'hidePlagiatBanner',
         'enablePartyMode',
-        'partyModeOnMinScore',
-        'brutePartyTriggered'
-    ];
-
-    const LEGACY_LS_KEYS = [
-        'brute_seen_tasks_v1',
-        'brute_last_reset_id_v1'
+        'partyModeOnMinScore'
     ];
 
     const SETTING_DEFAULTS = {
@@ -82,7 +93,6 @@
 
     const COURSE_PATH_REGEX = /^\/brute\/student\/course\/([^/]+)\/([^/]+)$/i;
 
-    // Raw area helpers (Promise-based across Firefox & Chrome)
     function rawGet(area, keys) {
         if (!area) return Promise.resolve({});
         if (isFirefox) {
@@ -131,21 +141,15 @@
         });
     }
 
-    function rawClear(area) {
-        if (!area) return Promise.resolve();
-        if (isFirefox) {
-            return area.clear().catch(() => {});
-        }
-        return new Promise((resolve) => {
-            try {
-                area.clear(() => resolve());
-            } catch (e) {
-                resolve();
-            }
-        });
+    function purgeLegacyLocalStorage() {
+        try {
+            if (typeof window === 'undefined' || !window.localStorage) return;
+            LEGACY_LS_KEYS.forEach(k => window.localStorage.removeItem(k));
+        } catch (e) {}
     }
 
-    // Normalize any task URL or path into canonical pathname
+    purgeLegacyLocalStorage();
+
     function normalizeTaskKey(rawKey) {
         if (!rawKey || typeof rawKey !== 'string') return '';
         let trimmed = rawKey.trim();
@@ -173,7 +177,14 @@
         }
     }
 
-    // Pack (state, autoSource, dangerX, partyDone) -> integer 0..59 (1 char in Base62)
+    function getCourseGroupKey(normKey) {
+        const m = String(normKey || '').match(COURSE_PATH_REGEX);
+        if (m && m[1] && m[2] && m[1] !== '_') {
+            return encodeToken(m[1]);
+        }
+        return '_';
+    }
+
     function packTaskCode(state, autoSource, dangerX, partyDone) {
         const sIdx = Object.prototype.hasOwnProperty.call(STATE_TO_IDX, state) ? STATE_TO_IDX[state] : 0;
         const normalizedAuto = (autoSource === true) ? 'summary' : (autoSource || '');
@@ -183,7 +194,6 @@
         return sIdx + (5 * aIdx) + (15 * dBit) + (30 * pBit);
     }
 
-    // Unpack integer 0..59 -> { state, autoSource, dangerX, partyDone }
     function unpackTaskCode(code) {
         const num = (typeof code === 'number' && !Number.isNaN(code) && code >= 0 && code < 60) ? code : 0;
         const sIdx = num % 5;
@@ -213,7 +223,285 @@
         return Number.isNaN(parsed) ? 0 : parsed;
     }
 
-    // Encode all 5 task maps into a compact course-grouped ASCII string
+    function nowEpochSec() {
+        return Math.floor(Date.now() / 1000);
+    }
+
+    const taskTimestamps = new Map();
+
+    // Returns a Map<groupKey, serializedGroupString> where each value is "<groupKey>=<slug>:<code36>~<ts36>,..."
+    function serializeActiveTasksByCourse(tasksMap, autoMap, partyMap, timestampsMap) {
+        const tasks = (tasksMap && typeof tasksMap === 'object') ? tasksMap : {};
+        const auto = (autoMap && typeof autoMap === 'object') ? autoMap : {};
+        const party = (partyMap && typeof partyMap === 'object') ? partyMap : {};
+        const tsLookup = timestampsMap instanceof Map ? timestampsMap : taskTimestamps;
+
+        const unified = new Map();
+        const ensureEntry = (rawKey) => {
+            const norm = normalizeTaskKey(rawKey);
+            if (!norm) return null;
+            let entry = unified.get(norm);
+            if (!entry) {
+                entry = {
+                    state: 'default',
+                    autoSource: '',
+                    partyDone: false,
+                    ts: tsLookup.get(norm) || 0
+                };
+                unified.set(norm, entry);
+            }
+            return entry;
+        };
+
+        for (const [k, v] of Object.entries(tasks)) {
+            if (typeof v !== 'string' || !Object.prototype.hasOwnProperty.call(STATE_TO_IDX, v)) continue;
+            const norm = normalizeTaskKey(k);
+            if (!norm) continue;
+            const hasTs = (tsLookup.get(norm) || 0) > 0;
+            if (v === 'default' && !hasTs && !auto[k] && !auto[norm] && !party[k] && !party[norm]) {
+                continue;
+            }
+            const entry = ensureEntry(norm);
+            if (entry) {
+                entry.state = v;
+            }
+        }
+
+        for (const [k, v] of Object.entries(auto)) {
+            if (!v) continue;
+            const entry = ensureEntry(k);
+            if (entry) {
+                entry.autoSource = (v === true) ? 'summary' : String(v);
+            }
+        }
+
+        for (const [k, v] of Object.entries(party)) {
+            if (!v) continue;
+            const entry = ensureEntry(k);
+            if (entry) {
+                entry.partyDone = true;
+            }
+        }
+
+        // Also include tombstones (state === 'default' with ts > 0) from tsLookup
+        if (tsLookup instanceof Map) {
+            for (const [rawKey, tsVal] of tsLookup.entries()) {
+                if (tsVal > 0) {
+                    ensureEntry(rawKey);
+                }
+            }
+        }
+
+        const groups = new Map();
+        const sortedKeys = Array.from(unified.keys()).sort();
+
+        for (const normKey of sortedKeys) {
+            const info = unified.get(normKey);
+            const code = packTaskCode(info.state, info.autoSource, false, info.partyDone);
+            if (code === 0 && !info.ts) continue;
+
+            const m = normKey.match(COURSE_PATH_REGEX);
+            let groupKey = '_';
+            let slug = '';
+            if (m && m[1] && m[2] && m[1] !== '_') {
+                groupKey = encodeToken(m[1]);
+                slug = encodeToken(m[2]);
+            } else {
+                groupKey = '_';
+                slug = encodeToken(normKey);
+            }
+
+            const tsPart = info.ts > 0 ? `~${info.ts.toString(36)}` : '';
+            const itemToken = `${slug}:${encodeBase62(code)}${tsPart}`;
+
+            if (!groups.has(groupKey)) {
+                groups.set(groupKey, []);
+            }
+            groups.get(groupKey).push(itemToken);
+        }
+
+        const courseMap = new Map();
+        for (const [groupKey, itemTokens] of groups.entries()) {
+            courseMap.set(groupKey, `${groupKey}=${itemTokens.join(',')}`);
+        }
+        return courseMap;
+    }
+
+    function serializeActiveTasks(tasksMap, autoMap, partyMap, timestampsMap) {
+        const courseMap = serializeActiveTasksByCourse(tasksMap, autoMap, partyMap, timestampsMap);
+        return Array.from(courseMap.values()).join('|');
+    }
+
+    function deserializeActiveTasks(serialized) {
+        const bruteTasks = {};
+        const bruteAutoCompleted = {};
+        const brutePartyTriggered = {};
+        const timestamps = new Map();
+
+        if (!serialized || typeof serialized !== 'string') {
+            return { bruteTasks, bruteAutoCompleted, brutePartyTriggered, timestamps };
+        }
+
+        const groups = serialized.split('|');
+        for (const groupPart of groups) {
+            if (!groupPart) continue;
+            const eqIdx = groupPart.indexOf('=');
+            if (eqIdx <= 0) continue;
+
+            const rawGroupKey = groupPart.slice(0, eqIdx);
+            const itemsPart = groupPart.slice(eqIdx + 1);
+            if (!itemsPart) continue;
+
+            const isFallbackGroup = (rawGroupKey === '_');
+            const courseId = isFallbackGroup ? '_' : decodeToken(rawGroupKey);
+
+            const items = itemsPart.split(',');
+            for (const itemToken of items) {
+                if (!itemToken) continue;
+
+                let tokenBody = itemToken;
+                let ts = 0;
+                const tildeIdx = itemToken.lastIndexOf('~');
+                if (tildeIdx > 0) {
+                    tokenBody = itemToken.slice(0, tildeIdx);
+                    const parsedTs = parseInt(itemToken.slice(tildeIdx + 1), 36);
+                    if (!Number.isNaN(parsedTs) && parsedTs > 0) {
+                        ts = parsedTs;
+                    }
+                }
+
+                const colonIdx = tokenBody.lastIndexOf(':');
+                let rawSlug = tokenBody;
+                let code = 0;
+                if (colonIdx > 0) {
+                    rawSlug = tokenBody.slice(0, colonIdx);
+                    code = decodeBase62(tokenBody.slice(colonIdx + 1));
+                }
+
+                const slug = decodeToken(rawSlug);
+                if (!slug) continue;
+
+                const fullKey = isFallbackGroup ? slug : `/brute/student/course/${courseId}/${slug}`;
+                const { state, autoSource, partyDone } = unpackTaskCode(code);
+
+                const existingTs = timestamps.get(fullKey) || 0;
+                if (existingTs > 0 && ts > 0 && ts < existingTs) {
+                    continue;
+                }
+
+                bruteTasks[fullKey] = state;
+                if (autoSource) {
+                    bruteAutoCompleted[fullKey] = autoSource;
+                } else {
+                    delete bruteAutoCompleted[fullKey];
+                }
+                if (partyDone) {
+                    brutePartyTriggered[fullKey] = true;
+                } else {
+                    delete brutePartyTriggered[fullKey];
+                }
+                if (ts > 0) {
+                    timestamps.set(fullKey, ts);
+                }
+            }
+        }
+
+        return { bruteTasks, bruteAutoCompleted, brutePartyTriggered, timestamps };
+    }
+
+    function serializeSeenAndDanger(seenMap, dangerMap, activeTasksMap) {
+        const seen = (seenMap && typeof seenMap === 'object') ? seenMap : {};
+        const danger = (dangerMap && typeof dangerMap === 'object') ? dangerMap : {};
+        const active = (activeTasksMap && typeof activeTasksMap === 'object') ? activeTasksMap : {};
+
+        const allSeen = new Map();
+        const addSeen = (rawKey, isDanger) => {
+            const norm = normalizeTaskKey(rawKey);
+            if (!norm) return;
+            const prev = allSeen.get(norm) || false;
+            allSeen.set(norm, Boolean(prev || isDanger));
+        };
+
+        for (const [k, v] of Object.entries(seen)) {
+            if (v) addSeen(k, false);
+        }
+        for (const [k, v] of Object.entries(active)) {
+            if (v) addSeen(k, false);
+        }
+        for (const [k, v] of Object.entries(danger)) {
+            if (v) addSeen(k, true);
+        }
+
+        const groups = new Map();
+        const sortedKeys = Array.from(allSeen.keys()).sort();
+
+        for (const normKey of sortedKeys) {
+            const isDanger = allSeen.get(normKey);
+            const m = normKey.match(COURSE_PATH_REGEX);
+            let groupKey = '_';
+            let slug = '';
+            if (m && m[1] && m[2] && m[1] !== '_') {
+                groupKey = encodeToken(m[1]);
+                slug = encodeToken(m[2]);
+            } else {
+                groupKey = '_';
+                slug = encodeToken(normKey);
+            }
+
+            const token = isDanger ? `${slug}!` : slug;
+            if (!groups.has(groupKey)) {
+                groups.set(groupKey, []);
+            }
+            groups.get(groupKey).push(token);
+        }
+
+        const groupStrings = [];
+        for (const [groupKey, tokens] of groups.entries()) {
+            groupStrings.push(`${groupKey}=${tokens.join(',')}`);
+        }
+        return groupStrings.join('|');
+    }
+
+    function deserializeSeenAndDanger(serialized) {
+        const bruteSeenTasks = {};
+        const bruteDangerTasks = {};
+
+        if (!serialized || typeof serialized !== 'string') {
+            return { bruteSeenTasks, bruteDangerTasks };
+        }
+
+        const groups = serialized.split('|');
+        for (const groupPart of groups) {
+            if (!groupPart) continue;
+            const eqIdx = groupPart.indexOf('=');
+            if (eqIdx <= 0) continue;
+
+            const rawGroupKey = groupPart.slice(0, eqIdx);
+            const itemsPart = groupPart.slice(eqIdx + 1);
+            if (!itemsPart) continue;
+
+            const isFallbackGroup = (rawGroupKey === '_');
+            const courseId = isFallbackGroup ? '_' : decodeToken(rawGroupKey);
+
+            const items = itemsPart.split(',');
+            for (const itemToken of items) {
+                if (!itemToken) continue;
+                const isDanger = itemToken.endsWith('!');
+                const rawSlug = isDanger ? itemToken.slice(0, -1) : itemToken;
+                const slug = decodeToken(rawSlug);
+                if (!slug) continue;
+
+                const fullKey = isFallbackGroup ? slug : `/brute/student/course/${courseId}/${slug}`;
+                bruteSeenTasks[fullKey] = 1;
+                if (isDanger) {
+                    bruteDangerTasks[fullKey] = true;
+                }
+            }
+        }
+
+        return { bruteSeenTasks, bruteDangerTasks };
+    }
+
     function serializeTaskMaps(tasksMap, seenMap, autoMap, dangerMap, partyMap) {
         const tasks = (tasksMap && typeof tasksMap === 'object') ? tasksMap : {};
         const seen = (seenMap && typeof seenMap === 'object') ? seenMap : {};
@@ -221,9 +509,7 @@
         const danger = (dangerMap && typeof dangerMap === 'object') ? dangerMap : {};
         const party = (partyMap && typeof partyMap === 'object') ? partyMap : {};
 
-        // Collect all unique normalized task keys across all maps
         const unified = new Map();
-
         const ensureEntry = (rawKey) => {
             const norm = normalizeTaskKey(rawKey);
             if (!norm) return null;
@@ -249,26 +535,19 @@
         for (const [k, v] of Object.entries(auto)) {
             if (!v) continue;
             const entry = ensureEntry(k);
-            if (entry) {
-                entry.autoSource = (v === true) ? 'summary' : String(v);
-            }
+            if (entry) entry.autoSource = (v === true) ? 'summary' : String(v);
         }
         for (const [k, v] of Object.entries(danger)) {
             if (!v) continue;
             const entry = ensureEntry(k);
-            if (entry) {
-                entry.dangerX = true;
-            }
+            if (entry) entry.dangerX = true;
         }
         for (const [k, v] of Object.entries(party)) {
             if (!v) continue;
             const entry = ensureEntry(k);
-            if (entry) {
-                entry.partyDone = true;
-            }
+            if (entry) entry.partyDone = true;
         }
 
-        // Group by courseId
         const groups = new Map();
         for (const [normKey, info] of unified.entries()) {
             const m = normKey.match(COURSE_PATH_REGEX);
@@ -298,7 +577,6 @@
         return groupStrings.join('|');
     }
 
-    // Decode compact course-grouped ASCII string back into the 5 task maps
     function deserializeTaskMaps(serialized) {
         const bruteTasks = {};
         const bruteSeenTasks = {};
@@ -331,8 +609,11 @@
                 let code = 0;
 
                 if (colonIdx > 0) {
-                    rawSlug = itemToken.slice(0, colonIdx);
-                    code = decodeBase62(itemToken.slice(colonIdx + 1));
+                    const possibleCode = itemToken.slice(colonIdx + 1);
+                    if (possibleCode.length === 1 && BASE62_CHARS.indexOf(possibleCode) >= 0) {
+                        rawSlug = itemToken.slice(0, colonIdx);
+                        code = decodeBase62(possibleCode);
+                    }
                 }
 
                 const slug = decodeToken(rawSlug);
@@ -341,17 +622,11 @@
                 const fullKey = isFallbackGroup ? slug : `/brute/student/course/${courseId}/${slug}`;
                 const { state, autoSource, dangerX, partyDone } = unpackTaskCode(code);
 
-                bruteTasks[fullKey] = state;
                 bruteSeenTasks[fullKey] = 1;
-                if (autoSource) {
-                    bruteAutoCompleted[fullKey] = autoSource;
-                }
-                if (dangerX) {
-                    bruteDangerTasks[fullKey] = true;
-                }
-                if (partyDone) {
-                    brutePartyTriggered[fullKey] = true;
-                }
+                bruteTasks[fullKey] = state;
+                if (autoSource) bruteAutoCompleted[fullKey] = autoSource;
+                if (dangerX) bruteDangerTasks[fullKey] = true;
+                if (partyDone) brutePartyTriggered[fullKey] = true;
             }
         }
 
@@ -368,42 +643,99 @@
     }
 
     function sanitizePlagiat(plagiat) {
-        if (!plagiat || typeof plagiat !== 'object') return null;
+        if (!plagiat || typeof plagiat !== 'object' || !plagiat.hasIncident) {
+            return null;
+        }
         return {
-            hasIncident: Boolean(plagiat.hasIncident),
-            title: String(plagiat.title || '').slice(0, 200),
-            details: String(plagiat.details || '').slice(0, 500),
-            courseUrl: String(plagiat.courseUrl || '').slice(0, 200),
-            pageTitle: String(plagiat.pageTitle || '').slice(0, 120),
+            hasIncident: true,
+            title: String(plagiat.title || 'Plagiat incident detected').slice(0, 120),
+            text: String(plagiat.text || '').slice(0, 200),
+            url: String(plagiat.url || '').slice(0, 200),
             lastDetectedAt: String(plagiat.lastDetectedAt || '').slice(0, 40),
             historyCount: Number(plagiat.historyCount) || 0
         };
     }
 
-    // Decode full logical state from raw sync storage items
+    function getSortedChunkString(raw, prefix) {
+        const matching = [];
+        for (const k of Object.keys(raw)) {
+            if (k.startsWith(prefix)) {
+                const idx = parseInt(k.slice(prefix.length), 10);
+                if (!Number.isNaN(idx) && idx >= 0 && typeof raw[k] === 'string') {
+                    matching.push({ idx, val: raw[k] });
+                }
+            }
+        }
+        matching.sort((a, b) => a.idx - b.idx);
+        return matching.map(m => m.val).join('');
+    }
+
+    function getCombinedActiveTaskString(raw) {
+        const parts = [];
+        const legacyChunkStr = getSortedChunkString(raw, TASK_CHUNK_PREFIX);
+        if (legacyChunkStr) {
+            parts.push(legacyChunkStr);
+        }
+        const courseKeys = Object.keys(raw).filter(k => k.startsWith(COURSE_KEY_PREFIX)).sort();
+        for (const k of courseKeys) {
+            const val = raw[k];
+            if (typeof val === 'string' && val.trim()) {
+                const groupKey = k.slice(COURSE_KEY_PREFIX.length);
+                parts.push(val.includes('=') ? val : `${groupKey}=${val}`);
+            }
+        }
+        return parts.join('|');
+    }
+
     function decodeSyncItems(syncItems) {
         const raw = (syncItems && typeof syncItems === 'object') ? syncItems : {};
-        const meta = (raw[META_KEY] && typeof raw[META_KEY] === 'object') ? raw[META_KEY] : null;
+        const metaResetAt = (raw[META_KEY] && Number(raw[META_KEY].r)) || 0;
 
-        let combinedChunkStr = '';
-        if (meta && typeof meta.n === 'number' && meta.n > 0) {
-            for (let i = 0; i < meta.n; i++) {
-                const part = raw[`${CHUNK_PREFIX}${i}`];
-                if (typeof part === 'string') {
-                    combinedChunkStr += part;
+        const combinedTaskStr = getCombinedActiveTaskString(raw);
+        const combinedSeenStr = getSortedChunkString(raw, SEEN_CHUNK_PREFIX);
+
+        const {
+            bruteTasks: activeTasks,
+            bruteAutoCompleted,
+            brutePartyTriggered,
+            timestamps
+        } = deserializeActiveTasks(combinedTaskStr);
+
+        const {
+            bruteSeenTasks,
+            bruteDangerTasks
+        } = deserializeSeenAndDanger(combinedSeenStr);
+
+        // Enforce global reset timestamp (b128_meta.r) if present
+        if (metaResetAt > 0) {
+            for (const [k, ts] of Array.from(timestamps.entries())) {
+                if (ts <= metaResetAt) {
+                    delete activeTasks[k];
+                    delete bruteAutoCompleted[k];
+                    delete brutePartyTriggered[k];
+                    timestamps.delete(k);
                 }
             }
         }
 
-        const {
-            bruteTasks,
-            bruteSeenTasks,
-            bruteAutoCompleted,
-            bruteDangerTasks,
-            brutePartyTriggered
-        } = deserializeTaskMaps(combinedChunkStr);
+        for (const [k, ts] of timestamps.entries()) {
+            const cur = taskTimestamps.get(k) || 0;
+            if (ts > cur) taskTimestamps.set(k, ts);
+        }
 
-        const settings = (meta && meta.s && typeof meta.s === 'object') ? meta.s : {};
+        for (const k of Object.keys(activeTasks)) {
+            bruteSeenTasks[k] = 1;
+        }
+
+        const bruteTasks = { ...activeTasks };
+        for (const k of Object.keys(bruteSeenTasks)) {
+            if (!Object.prototype.hasOwnProperty.call(bruteTasks, k)) {
+                bruteTasks[k] = 'default';
+            }
+        }
+
+        const settings = (raw[SETTINGS_KEY] && typeof raw[SETTINGS_KEY] === 'object') ? raw[SETTINGS_KEY] : {};
+        const plagiat = (raw[PLAGIAT_KEY] && typeof raw[PLAGIAT_KEY] === 'object') ? raw[PLAGIAT_KEY] : null;
 
         return {
             bruteTasks,
@@ -411,7 +743,7 @@
             bruteAutoCompleted,
             bruteDangerTasks,
             brutePartyTriggered,
-            plagiatIncident: (meta && meta.p) ? meta.p : null,
+            plagiatIncident: plagiat,
             classicUiStyle: typeof settings.classicUiStyle === 'boolean' ? settings.classicUiStyle : SETTING_DEFAULTS.classicUiStyle,
             courseSummaryToBottom: typeof settings.courseSummaryToBottom === 'boolean' ? settings.courseSummaryToBottom : SETTING_DEFAULTS.courseSummaryToBottom,
             autoDetectCompletion: typeof settings.autoDetectCompletion === 'boolean' ? settings.autoDetectCompletion : SETTING_DEFAULTS.autoDetectCompletion,
@@ -421,85 +753,49 @@
             hideNewTaskBadge: typeof settings.hideNewTaskBadge === 'boolean' ? settings.hideNewTaskBadge : SETTING_DEFAULTS.hideNewTaskBadge,
             hidePlagiatBanner: typeof settings.hidePlagiatBanner === 'boolean' ? settings.hidePlagiatBanner : SETTING_DEFAULTS.hidePlagiatBanner,
             enablePartyMode: typeof settings.enablePartyMode === 'boolean' ? settings.enablePartyMode : SETTING_DEFAULTS.enablePartyMode,
-            partyModeOnMinScore: typeof settings.partyModeOnMinScore === 'boolean' ? settings.partyModeOnMinScore : SETTING_DEFAULTS.partyModeOnMinScore
+            partyModeOnMinScore: typeof settings.partyModeOnMinScore === 'boolean' ? settings.partyModeOnMinScore : SETTING_DEFAULTS.partyModeOnMinScore,
+            _timestamps: timestamps,
+            _resetAt: metaResetAt
         };
     }
 
-    // Write full logical state into storage.sync using b_meta + b_c_0..N and remove excess chunks
-    function persistFullStateToSync(fullState, previousChunkCount) {
-        const serializedTasks = serializeTaskMaps(
-            fullState.bruteTasks,
-            fullState.bruteSeenTasks,
-            fullState.bruteAutoCompleted,
-            fullState.bruteDangerTasks,
-            fullState.brutePartyTriggered
-        );
-        const chunks = splitIntoChunks(serializedTasks);
+    function stripInternalFields(state) {
+        if (!state || typeof state !== 'object') return state;
+        const copy = { ...state };
+        delete copy._timestamps;
+        delete copy._resetAt;
+        return copy;
+    }
 
-        const meta = {
-            v: SCHEMA_VERSION,
-            n: chunks.length,
-            s: {
-                classicUiStyle: Boolean(fullState.classicUiStyle),
-                courseSummaryToBottom: Boolean(fullState.courseSummaryToBottom),
-                autoDetectCompletion: fullState.autoDetectCompletion !== false,
-                autoCompleteRemovedX: fullState.autoCompleteRemovedX !== false,
-                showCompletionToast: fullState.showCompletionToast !== false,
-                showGreenCheckmarks: fullState.showGreenCheckmarks !== false,
-                hideNewTaskBadge: Boolean(fullState.hideNewTaskBadge),
-                hidePlagiatBanner: fullState.hidePlagiatBanner !== false,
-                enablePartyMode: fullState.enablePartyMode !== false,
-                partyModeOnMinScore: Boolean(fullState.partyModeOnMinScore)
-            },
-            p: sanitizePlagiat(fullState.plagiatIncident)
-        };
+    function cloneState(state) {
+        if (!state) return null;
+        return JSON.parse(JSON.stringify(stripInternalFields(state)));
+    }
 
-        const payload = { [META_KEY]: meta };
-        chunks.forEach((chunkStr, idx) => {
-            payload[`${CHUNK_PREFIX}${idx}`] = chunkStr;
-        });
+    // Removes ONLY pre-1.28 keys (never writes to storage.sync during purge)
+    function purgePre128Storage() {
+        purgeLegacyLocalStorage();
 
-        const staleChunkKeys = [];
-        const maxOld = (typeof previousChunkCount === 'number' && previousChunkCount > chunks.length)
-            ? previousChunkCount
-            : 0;
-        for (let i = chunks.length; i < maxOld; i++) {
-            staleChunkKeys.push(`${CHUNK_PREFIX}${i}`);
-        }
+        return Promise.all([
+            rawGet(syncArea, null),
+            localArea && localArea !== syncArea ? rawGet(localArea, null) : Promise.resolve({})
+        ]).then(([syncRaw, localRaw]) => {
+            const obsoleteSyncKeys = Object.keys(syncRaw || {}).filter(k => !k.startsWith(KEY_PREFIX));
+            const obsoleteLocalKeys = Object.keys(localRaw || {}).filter(k => !k.startsWith(KEY_PREFIX));
 
-        return rawSet(syncArea, payload).then(() => {
-            if (staleChunkKeys.length > 0) {
-                return rawRemove(syncArea, staleChunkKeys);
+            const ops = [];
+            if (obsoleteSyncKeys.length > 0) {
+                ops.push(rawRemove(syncArea, obsoleteSyncKeys));
             }
+            if (obsoleteLocalKeys.length > 0 && localArea && localArea !== syncArea) {
+                ops.push(rawRemove(localArea, obsoleteLocalKeys));
+            }
+            return Promise.all(ops).then(() => rawGet(syncArea, null));
         });
-    }
-
-    function readLegacyLocalStorageSeen() {
-        try {
-            if (typeof window === 'undefined' || !window.localStorage) return null;
-            const raw = window.localStorage.getItem('brute_seen_tasks_v1');
-            if (!raw) return null;
-            const parsed = JSON.parse(raw);
-            return (parsed && typeof parsed === 'object') ? parsed : null;
-        } catch (e) {
-            return null;
-        }
-    }
-
-    function purgeLegacyLocalStorage() {
-        try {
-            if (typeof window === 'undefined' || !window.localStorage) return;
-            LEGACY_LS_KEYS.forEach(k => window.localStorage.removeItem(k));
-        } catch (e) {}
-    }
-
-    function hasAnyLegacyKeys(obj) {
-        if (!obj || typeof obj !== 'object') return false;
-        return LEGACY_KEYS.some(k => Object.prototype.hasOwnProperty.call(obj, k));
     }
 
     let cachedLogicalState = null;
-    let migrationDone = false;
+    let purgeChecked = false;
     let opQueue = Promise.resolve();
 
     function enqueueOp(fn) {
@@ -507,121 +803,326 @@
         return opQueue;
     }
 
-    // Perform one-time backwards-compatible migration & purge if any legacy keys exist
-    function ensureMigratedAndLoadRaw() {
-        return Promise.all([
-            rawGet(syncArea, null),
-            localArea && localArea !== syncArea ? rawGet(localArea, null) : Promise.resolve({})
-        ]).then(([syncRaw, localRaw]) => {
-            const legacySeenFromLS = readLegacyLocalStorageSeen();
-            const hasSyncLegacy = hasAnyLegacyKeys(syncRaw);
-            const hasLocalData = Boolean(localRaw && Object.keys(localRaw).length > 0);
-            const hasLSData = Boolean(legacySeenFromLS && Object.keys(legacySeenFromLS).length > 0);
-
-            const baseState = decodeSyncItems(syncRaw);
-
-            if (!migrationDone && (hasSyncLegacy || hasLocalData || hasLSData)) {
-                migrationDone = true;
-
-                // Merge legacy sources (sync legacy -> local legacy -> localStorage -> existing v2 sync)
-                const mergedTasks = {
-                    ...(syncRaw.bruteTasks || {}),
-                    ...(localRaw.bruteTasks || {}),
-                    ...baseState.bruteTasks
-                };
-                const mergedSeen = {
-                    ...(syncRaw.bruteSeenTasks || {}),
-                    ...(localRaw.bruteSeenTasks || {}),
-                    ...(legacySeenFromLS || {}),
-                    ...baseState.bruteSeenTasks
-                };
-                // Any task in legacy bruteTasks was already seen
-                for (const k of Object.keys(mergedTasks)) {
-                    mergedSeen[k] = 1;
-                }
-
-                const mergedAuto = {
-                    ...(syncRaw.bruteAutoCompleted || {}),
-                    ...(localRaw.bruteAutoCompleted || {}),
-                    ...baseState.bruteAutoCompleted
-                };
-                const mergedDanger = {
-                    ...(syncRaw.bruteDangerTasks || {}),
-                    ...(localRaw.bruteDangerTasks || {}),
-                    ...baseState.bruteDangerTasks
-                };
-                const mergedParty = {
-                    ...(syncRaw.brutePartyTriggered || {}),
-                    ...(localRaw.brutePartyTriggered || {}),
-                    ...baseState.brutePartyTriggered
-                };
-
-                const pickSetting = (key) => {
-                    if (syncRaw[META_KEY] && syncRaw[META_KEY].s && typeof syncRaw[META_KEY].s[key] === 'boolean') {
-                        return syncRaw[META_KEY].s[key];
-                    }
-                    if (typeof localRaw[key] === 'boolean') return localRaw[key];
-                    if (typeof syncRaw[key] === 'boolean') return syncRaw[key];
-                    return SETTING_DEFAULTS[key];
-                };
-
-                const migratedState = {
-                    bruteTasks: mergedTasks,
-                    bruteSeenTasks: mergedSeen,
-                    bruteAutoCompleted: mergedAuto,
-                    bruteDangerTasks: mergedDanger,
-                    brutePartyTriggered: mergedParty,
-                    plagiatIncident: baseState.plagiatIncident || localRaw.plagiatIncident || syncRaw.plagiatIncident || null,
-                    classicUiStyle: pickSetting('classicUiStyle'),
-                    courseSummaryToBottom: pickSetting('courseSummaryToBottom'),
-                    autoDetectCompletion: pickSetting('autoDetectCompletion'),
-                    autoCompleteRemovedX: pickSetting('autoCompleteRemovedX'),
-                    showCompletionToast: pickSetting('showCompletionToast'),
-                    showGreenCheckmarks: pickSetting('showGreenCheckmarks'),
-                    hideNewTaskBadge: pickSetting('hideNewTaskBadge'),
-                    hidePlagiatBanner: pickSetting('hidePlagiatBanner'),
-                    enablePartyMode: pickSetting('enablePartyMode'),
-                    partyModeOnMinScore: pickSetting('partyModeOnMinScore')
-                };
-
-                const prevChunks = (syncRaw[META_KEY] && typeof syncRaw[META_KEY].n === 'number') ? syncRaw[META_KEY].n : 0;
-
-                return persistFullStateToSync(migratedState, prevChunks)
-                    .then(() => {
-                        const cleanupPromises = [];
-                        if (hasSyncLegacy) {
-                            cleanupPromises.push(rawRemove(syncArea, LEGACY_KEYS));
-                        }
-                        if (hasLocalData && localArea && localArea !== syncArea) {
-                            cleanupPromises.push(rawClear(localArea));
-                        }
-                        purgeLegacyLocalStorage();
-                        return Promise.all(cleanupPromises);
-                    })
-                    .then(() => rawGet(syncArea, null))
-                    .then((freshSyncRaw) => {
-                        const decoded = decodeSyncItems(freshSyncRaw);
-                        cachedLogicalState = cloneState(decoded);
-                        return decoded;
-                    });
+    function ensureCleanV128AndLoadRaw() {
+        return rawGet(syncArea, null).then((syncRaw) => {
+            const hasObsoleteSync = Object.keys(syncRaw || {}).some(k => !k.startsWith(KEY_PREFIX));
+            if (!purgeChecked || hasObsoleteSync) {
+                purgeChecked = true;
+                return purgePre128Storage();
             }
-
-            migrationDone = true;
-            purgeLegacyLocalStorage();
-            cachedLogicalState = cloneState(baseState);
-            return baseState;
+            return syncRaw;
         });
     }
 
-    function cloneState(state) {
-        if (!state) return null;
-        return JSON.parse(JSON.stringify(state));
+    // Persists modified domains to storage.sync AND updates b128_local_shadow in storage.local
+    function persistDomainsToSync(syncRaw, nextState, mergedTimestamps, dirtyDomains) {
+        const raw = syncRaw || {};
+        const candidatePayload = {};
+        const keysToRemove = [];
+
+        const currentMeta = (raw[META_KEY] && typeof raw[META_KEY] === 'object') ? raw[META_KEY] : null;
+        const desiredResetAt = Number(nextState._resetAt || (currentMeta && currentMeta.r) || 0);
+        const desiredMeta = desiredResetAt > 0
+            ? { v: DB_VERSION, r: desiredResetAt }
+            : { v: DB_VERSION };
+
+        if (!currentMeta || currentMeta.v !== desiredMeta.v || (currentMeta.r || 0) !== (desiredMeta.r || 0)) {
+            candidatePayload[META_KEY] = desiredMeta;
+        }
+
+        // Domain 1: Active Tasks — stored per course (b128_c_<COURSE>) + clean up legacy b128_t_0
+        if (dirtyDomains.tasks) {
+            const courseMap = serializeActiveTasksByCourse(
+                nextState.bruteTasks,
+                nextState.bruteAutoCompleted,
+                nextState.brutePartyTriggered,
+                mergedTimestamps
+            );
+            const targetCourses = dirtyDomains.courses instanceof Set ? dirtyDomains.courses : null;
+
+            for (const [groupKey, serializedCourse] of courseMap.entries()) {
+                if (!targetCourses || targetCourses.has(groupKey)) {
+                    candidatePayload[`${COURSE_KEY_PREFIX}${groupKey}`] = serializedCourse;
+                }
+            }
+
+            // Remove empty course keys or legacy b128_t_* chunks
+            for (const k of Object.keys(raw)) {
+                if (k.startsWith(COURSE_KEY_PREFIX)) {
+                    const groupKey = k.slice(COURSE_KEY_PREFIX.length);
+                    if ((!targetCourses || targetCourses.has(groupKey)) && !courseMap.has(groupKey)) {
+                        keysToRemove.push(k);
+                    }
+                } else if (k.startsWith(TASK_CHUNK_PREFIX) && !targetCourses) {
+                    keysToRemove.push(k);
+                }
+            }
+
+            // Also keep b128_t_0 updated when writing full task sets (or migrating from 1.28)
+            const serializedAllTasks = Array.from(courseMap.values()).join('|');
+            const taskChunks = splitIntoChunks(serializedAllTasks);
+            taskChunks.forEach((chunk, idx) => {
+                candidatePayload[`${TASK_CHUNK_PREFIX}${idx}`] = chunk;
+            });
+            for (const k of Object.keys(raw)) {
+                if (k.startsWith(TASK_CHUNK_PREFIX)) {
+                    const idx = parseInt(k.slice(TASK_CHUNK_PREFIX.length), 10);
+                    if (!Number.isNaN(idx) && idx >= taskChunks.length) {
+                        keysToRemove.push(k);
+                    }
+                }
+            }
+        }
+
+        // Domain 2: Seen & Danger Badges (b128_s_0..N)
+        if (dirtyDomains.seen) {
+            const serializedSeen = serializeSeenAndDanger(
+                nextState.bruteSeenTasks,
+                nextState.bruteDangerTasks,
+                nextState.bruteTasks
+            );
+            const seenChunks = splitIntoChunks(serializedSeen);
+            seenChunks.forEach((chunk, idx) => {
+                candidatePayload[`${SEEN_CHUNK_PREFIX}${idx}`] = chunk;
+            });
+
+            for (const k of Object.keys(raw)) {
+                if (k.startsWith(SEEN_CHUNK_PREFIX)) {
+                    const idx = parseInt(k.slice(SEEN_CHUNK_PREFIX.length), 10);
+                    if (!Number.isNaN(idx) && idx >= seenChunks.length) {
+                        keysToRemove.push(k);
+                    }
+                }
+            }
+        }
+
+        // Domain 3: User Settings (b128_settings)
+        if (dirtyDomains.settings) {
+            candidatePayload[SETTINGS_KEY] = {
+                classicUiStyle: Boolean(nextState.classicUiStyle),
+                courseSummaryToBottom: Boolean(nextState.courseSummaryToBottom),
+                autoDetectCompletion: nextState.autoDetectCompletion !== false,
+                autoCompleteRemovedX: nextState.autoCompleteRemovedX !== false,
+                showCompletionToast: nextState.showCompletionToast !== false,
+                showGreenCheckmarks: nextState.showGreenCheckmarks !== false,
+                hideNewTaskBadge: Boolean(nextState.hideNewTaskBadge),
+                hidePlagiatBanner: nextState.hidePlagiatBanner !== false,
+                enablePartyMode: nextState.enablePartyMode !== false,
+                partyModeOnMinScore: Boolean(nextState.partyModeOnMinScore)
+            };
+        }
+
+        // Domain 4: Plagiat Monitor (b128_plagiat)
+        if (dirtyDomains.plagiat) {
+            const desiredPlagiat = sanitizePlagiat(nextState.plagiatIncident);
+            if (desiredPlagiat) {
+                candidatePayload[PLAGIAT_KEY] = desiredPlagiat;
+            } else if (Object.prototype.hasOwnProperty.call(raw, PLAGIAT_KEY)) {
+                keysToRemove.push(PLAGIAT_KEY);
+            }
+        }
+
+        // Compute exact byte-for-byte diff against syncRaw
+        const keysToWrite = {};
+        for (const [k, val] of Object.entries(candidatePayload)) {
+            if (JSON.stringify(raw[k]) !== JSON.stringify(val)) {
+                keysToWrite[k] = val;
+            }
+        }
+
+        const uniqueKeysToRemove = Array.from(new Set(keysToRemove)).filter(
+            k => !Object.prototype.hasOwnProperty.call(candidatePayload, k)
+        );
+
+        const writePromise = Object.keys(keysToWrite).length > 0
+            ? rawSet(syncArea, keysToWrite)
+            : Promise.resolve();
+
+        return writePromise.then(() => {
+            if (uniqueKeysToRemove.length > 0) {
+                return rawRemove(syncArea, uniqueKeysToRemove);
+            }
+        }).then(() => {
+            return saveLocalShadow(nextState, mergedTimestamps, desiredResetAt);
+        });
     }
 
-    // Public API: Read logical keys from synced storage
+    function saveLocalShadow(state, timestampsMap, resetAtVal) {
+        if (!localArea || localArea === syncArea) return Promise.resolve();
+        const tsLookup = timestampsMap instanceof Map ? timestampsMap : taskTimestamps;
+        const resetAt = Number(resetAtVal || state._resetAt || 0);
+
+        return rawGet(localArea, [LOCAL_SHADOW_KEY]).then((localRaw) => {
+            const existing = (localRaw && localRaw[LOCAL_SHADOW_KEY] && typeof localRaw[LOCAL_SHADOW_KEY] === 'object')
+                ? localRaw[LOCAL_SHADOW_KEY]
+                : { tasks: {}, seen: {}, resetAt: 0 };
+
+            const nextShadowTasks = {};
+            if (existing.tasks && typeof existing.tasks === 'object') {
+                for (const [k, entry] of Object.entries(existing.tasks)) {
+                    if (entry && (Number(entry.t) || 0) > resetAt) {
+                        nextShadowTasks[k] = entry;
+                    }
+                }
+            }
+
+            const allTaskKeys = new Set([
+                ...Object.keys(state.bruteTasks || {}),
+                ...Array.from(tsLookup.keys())
+            ]);
+
+            for (const rawKey of allTaskKeys) {
+                const norm = normalizeTaskKey(rawKey);
+                if (!norm) continue;
+                const ts = tsLookup.get(norm) || 0;
+                const st = (state.bruteTasks && state.bruteTasks[norm]) || 'default';
+                const au = (state.bruteAutoCompleted && state.bruteAutoCompleted[norm]) || '';
+                const pa = Boolean(state.brutePartyTriggered && state.brutePartyTriggered[norm]);
+
+                if (st === 'default' && !ts && !au && !pa) continue;
+                const effectiveTs = ts > 0 ? ts : Math.max(resetAt + 1, 1);
+                if (effectiveTs <= resetAt) continue;
+
+                const prevEntry = nextShadowTasks[norm];
+                if (!prevEntry || effectiveTs >= (Number(prevEntry.t) || 0)) {
+                    nextShadowTasks[norm] = {
+                        s: st,
+                        a: au,
+                        p: pa ? 1 : 0,
+                        t: effectiveTs
+                    };
+                }
+            }
+
+            const nextShadowSeen = (resetAt > (Number(existing.resetAt) || 0))
+                ? {}
+                : { ...(existing.seen || {}) };
+            for (const [k, v] of Object.entries(state.bruteSeenTasks || {})) {
+                if (v) nextShadowSeen[normalizeTaskKey(k)] = 1;
+            }
+
+            const nextShadow = {
+                tasks: nextShadowTasks,
+                seen: nextShadowSeen,
+                resetAt: Math.max(resetAt, Number(existing.resetAt) || 0)
+            };
+
+            if (JSON.stringify(existing) === JSON.stringify(nextShadow)) {
+                return;
+            }
+            return rawSet(localArea, { [LOCAL_SHADOW_KEY]: nextShadow });
+        });
+    }
+
+    // Reconciles storage.sync with storage.local shadow backup (Auto-Heal)
+    function loadAndReconcileState() {
+        return Promise.all([
+            ensureCleanV128AndLoadRaw(),
+            localArea && localArea !== syncArea ? rawGet(localArea, [LOCAL_SHADOW_KEY]) : Promise.resolve({})
+        ]).then(([syncRaw, localRaw]) => {
+            const decoded = decodeSyncItems(syncRaw);
+            if (!localArea || localArea === syncArea) {
+                return { syncRaw, fullState: decoded };
+            }
+
+            const shadow = (localRaw && localRaw[LOCAL_SHADOW_KEY] && typeof localRaw[LOCAL_SHADOW_KEY] === 'object')
+                ? localRaw[LOCAL_SHADOW_KEY]
+                : null;
+
+            if (!shadow || (!shadow.tasks && !shadow.seen)) {
+                // Seed initial local shadow from current sync state
+                return saveLocalShadow(decoded, decoded._timestamps, decoded._resetAt).then(() => ({
+                    syncRaw,
+                    fullState: decoded
+                }));
+            }
+
+            const syncResetAt = Number(decoded._resetAt || 0);
+            const shadowResetAt = Number(shadow.resetAt || 0);
+            const effectiveResetAt = Math.max(syncResetAt, shadowResetAt);
+            decoded._resetAt = effectiveResetAt;
+
+            if (effectiveResetAt > 0) {
+                for (const [k, ts] of Array.from(taskTimestamps.entries())) {
+                    if (ts <= effectiveResetAt) {
+                        taskTimestamps.delete(k);
+                    }
+                }
+            }
+
+            const healedCourses = new Set();
+            let healedAnyTask = false;
+
+            const shadowTasks = (shadow.tasks && typeof shadow.tasks === 'object') ? shadow.tasks : {};
+            for (const [rawKey, entry] of Object.entries(shadowTasks)) {
+                const norm = normalizeTaskKey(rawKey);
+                if (!norm || !entry || typeof entry !== 'object') continue;
+                const shadowTs = Number(entry.t) || 0;
+                if (shadowTs <= effectiveResetAt) continue;
+
+                const syncTs = decoded._timestamps.get(norm) || 0;
+                // If local shadow has a strictly newer timestamp (or task was wiped from sync by an un-synced device)
+                if (shadowTs > syncTs) {
+                    const restoredState = (typeof entry.s === 'string' && Object.prototype.hasOwnProperty.call(STATE_TO_IDX, entry.s))
+                        ? entry.s
+                        : 'default';
+                    decoded.bruteTasks[norm] = restoredState;
+                    if (entry.a) {
+                        decoded.bruteAutoCompleted[norm] = String(entry.a);
+                    } else {
+                        delete decoded.bruteAutoCompleted[norm];
+                    }
+                    if (entry.p) {
+                        decoded.brutePartyTriggered[norm] = true;
+                    } else {
+                        delete decoded.brutePartyTriggered[norm];
+                    }
+                    decoded._timestamps.set(norm, shadowTs);
+                    taskTimestamps.set(norm, shadowTs);
+                    decoded.bruteSeenTasks[norm] = 1;
+                    healedCourses.add(getCourseGroupKey(norm));
+                    healedAnyTask = true;
+                }
+            }
+
+            // Merge seen tasks from shadow if not reset
+            if (syncResetAt <= shadowResetAt && shadow.seen && typeof shadow.seen === 'object') {
+                for (const [k, v] of Object.entries(shadow.seen)) {
+                    if (!v) continue;
+                    const norm = normalizeTaskKey(k);
+                    if (norm && !decoded.bruteSeenTasks[norm]) {
+                        decoded.bruteSeenTasks[norm] = 1;
+                        if (!Object.prototype.hasOwnProperty.call(decoded.bruteTasks, norm)) {
+                            decoded.bruteTasks[norm] = 'default';
+                        }
+                    }
+                }
+            }
+
+            if (healedAnyTask) {
+                return persistDomainsToSync(
+                    syncRaw,
+                    decoded,
+                    decoded._timestamps,
+                    { tasks: true, courses: healedCourses, seen: false, settings: false, plagiat: false }
+                ).then(() => rawGet(syncArea, null)).then((updatedSyncRaw) => ({
+                    syncRaw: updatedSyncRaw,
+                    fullState: decoded
+                }));
+            }
+
+            return saveLocalShadow(decoded, decoded._timestamps, effectiveResetAt).then(() => ({
+                syncRaw,
+                fullState: decoded
+            }));
+        });
+    }
+
     function readStorage(keys) {
         return enqueueOp(() => {
-            return ensureMigratedAndLoadRaw().then((fullState) => {
+            return loadAndReconcileState().then(({ fullState }) => {
+                cachedLogicalState = cloneState(fullState);
+
                 if (!keys) return cloneState(fullState);
                 const keyList = Array.isArray(keys) ? keys : [keys];
                 const result = {};
@@ -635,57 +1136,212 @@
         });
     }
 
-    // Public API: Write partial or full logical keys into chunked storage.sync
     function writeStorage(partialData) {
         if (!partialData || typeof partialData !== 'object') return Promise.resolve();
         return enqueueOp(() => {
-            return rawGet(syncArea, null).then((syncRaw) => {
-                const currentState = decodeSyncItems(syncRaw);
-                const prevChunks = (syncRaw[META_KEY] && typeof syncRaw[META_KEY].n === 'number') ? syncRaw[META_KEY].n : 0;
+            return loadAndReconcileState().then(({ syncRaw, fullState: currentState }) => {
+                const mergedTimestamps = new Map(currentState._timestamps || []);
+                const minAllowedTs = Number(currentState._resetAt || 0) + 1;
+                const nowSec = Math.max(nowEpochSec(), minAllowedTs);
+                const modifiedCourses = new Set();
+
+                const dirtyDomains = {
+                    tasks: Boolean(partialData.bruteTasks || partialData.bruteAutoCompleted || partialData.brutePartyTriggered),
+                    courses: modifiedCourses,
+                    seen: Boolean(partialData.bruteSeenTasks || partialData.bruteDangerTasks),
+                    settings: SETTING_KEYS.some(k => Object.prototype.hasOwnProperty.call(partialData, k)),
+                    plagiat: Object.prototype.hasOwnProperty.call(partialData, 'plagiatIncident')
+                };
+
+                const mergedTasks = { ...currentState.bruteTasks };
+                if (partialData.bruteTasks && typeof partialData.bruteTasks === 'object') {
+                    for (const [rawKey, nextVal] of Object.entries(partialData.bruteTasks)) {
+                        const norm = normalizeTaskKey(rawKey);
+                        if (!norm || typeof nextVal !== 'string') continue;
+
+                        const prevVal = currentState.bruteTasks[norm] || 'default';
+                        const prevTs = mergedTimestamps.get(norm) || 0;
+                        const wasManualUserState = (prevVal !== 'default' && !currentState.bruteAutoCompleted[norm]);
+                        const isIncomingAutoComplete = Boolean(
+                            partialData.bruteAutoCompleted && partialData.bruteAutoCompleted[norm]
+                        );
+
+                        // Never let an automatic page-load completion overwrite a manual user state
+                        if (wasManualUserState && isIncomingAutoComplete) {
+                            continue;
+                        }
+
+                        if (nextVal !== prevVal) {
+                            mergedTasks[norm] = nextVal;
+                            const nextTs = Math.max(nowSec, prevTs + 1);
+                            mergedTimestamps.set(norm, nextTs);
+                            taskTimestamps.set(norm, nextTs);
+                            modifiedCourses.add(getCourseGroupKey(norm));
+                        }
+                    }
+                }
+
+                // Merge seen tasks additively (union)
+                const mergedSeen = { ...currentState.bruteSeenTasks };
+                if (partialData.bruteSeenTasks && typeof partialData.bruteSeenTasks === 'object') {
+                    for (const [rawKey, val] of Object.entries(partialData.bruteSeenTasks)) {
+                        if (!val) continue;
+                        const norm = normalizeTaskKey(rawKey);
+                        if (norm) mergedSeen[norm] = 1;
+                    }
+                }
+                for (const k of Object.keys(mergedTasks)) {
+                    mergedSeen[k] = 1;
+                }
+
+                // Merge autoCompleted additively while respecting manual user states
+                const mergedAuto = { ...currentState.bruteAutoCompleted };
+                if (partialData.bruteAutoCompleted && typeof partialData.bruteAutoCompleted === 'object') {
+                    for (const [rawKey, val] of Object.entries(partialData.bruteAutoCompleted)) {
+                        const norm = normalizeTaskKey(rawKey);
+                        if (!norm) continue;
+                        if (!val) {
+                            delete mergedAuto[norm];
+                            modifiedCourses.add(getCourseGroupKey(norm));
+                            continue;
+                        }
+                        const prevVal = currentState.bruteTasks[norm] || 'default';
+                        const wasManualUserState = (prevVal !== 'default' && !currentState.bruteAutoCompleted[norm]);
+                        if (wasManualUserState) {
+                            continue;
+                        }
+                        mergedAuto[norm] = (val === true) ? 'summary' : String(val);
+                        if (!mergedTimestamps.get(norm)) {
+                            mergedTimestamps.set(norm, nowSec);
+                            taskTimestamps.set(norm, nowSec);
+                        }
+                        modifiedCourses.add(getCourseGroupKey(norm));
+                    }
+                }
+
+                // Merge dangerTasks
+                let mergedDanger = { ...currentState.bruteDangerTasks };
+                if (partialData.bruteDangerTasks && typeof partialData.bruteDangerTasks === 'object') {
+                    mergedDanger = { ...currentState.bruteDangerTasks };
+                    for (const [rawKey, val] of Object.entries(partialData.bruteDangerTasks)) {
+                        const norm = normalizeTaskKey(rawKey);
+                        if (!norm) continue;
+                        if (val) {
+                            mergedDanger[norm] = true;
+                        } else {
+                            delete mergedDanger[norm];
+                        }
+                    }
+                }
+
+                // Merge partyTriggered additively (union)
+                const mergedParty = { ...currentState.brutePartyTriggered };
+                if (partialData.brutePartyTriggered && typeof partialData.brutePartyTriggered === 'object') {
+                    for (const [rawKey, val] of Object.entries(partialData.brutePartyTriggered)) {
+                        if (!val) continue;
+                        const norm = normalizeTaskKey(rawKey);
+                        if (norm) {
+                            mergedParty[norm] = true;
+                            if (!mergedTimestamps.get(norm)) {
+                                mergedTimestamps.set(norm, nowSec);
+                                taskTimestamps.set(norm, nowSec);
+                            }
+                            modifiedCourses.add(getCourseGroupKey(norm));
+                        }
+                    }
+                }
 
                 const nextState = {
                     ...currentState,
-                    ...partialData
+                    ...partialData,
+                    bruteTasks: mergedTasks,
+                    bruteSeenTasks: mergedSeen,
+                    bruteAutoCompleted: mergedAuto,
+                    bruteDangerTasks: mergedDanger,
+                    brutePartyTriggered: mergedParty
                 };
 
-                // Ensure any task present in bruteTasks is also marked seen in bruteSeenTasks
-                if (partialData.bruteTasks && !partialData.bruteSeenTasks) {
-                    const nextSeen = { ...(currentState.bruteSeenTasks || {}) };
-                    for (const k of Object.keys(partialData.bruteTasks)) {
-                        const norm = normalizeTaskKey(k);
-                        if (norm) nextSeen[norm] = 1;
-                    }
-                    nextState.bruteSeenTasks = nextSeen;
-                }
-
-                return persistFullStateToSync(nextState, prevChunks).then(() => {
-                    cachedLogicalState = cloneState(decodeSyncItemsForCache(nextState));
+                return persistDomainsToSync(syncRaw, nextState, mergedTimestamps, dirtyDomains).then(() => {
+                    cachedLogicalState = cloneState(nextState);
                 });
             });
         });
     }
 
-    function decodeSyncItemsForCache(state) {
-        const serialized = serializeTaskMaps(
-            state.bruteTasks,
-            state.bruteSeenTasks,
-            state.bruteAutoCompleted,
-            state.bruteDangerTasks,
-            state.brutePartyTriggered
-        );
-        const maps = deserializeTaskMaps(serialized);
-        return {
-            ...state,
-            ...maps,
-            plagiatIncident: sanitizePlagiat(state.plagiatIncident)
-        };
+    function updateSingleTaskState(rawTaskKey, nextStateValue) {
+        const norm = normalizeTaskKey(rawTaskKey);
+        if (!norm) return Promise.resolve();
+        return enqueueOp(() => {
+            return loadAndReconcileState().then(({ syncRaw, fullState: currentState }) => {
+                const mergedTimestamps = new Map(currentState._timestamps || []);
+                const minAllowedTs = Number(currentState._resetAt || 0) + 1;
+                const nowSec = Math.max(nowEpochSec(), minAllowedTs);
+                const prevTs = mergedTimestamps.get(norm) || 0;
+                const newTs = Math.max(nowSec, prevTs + 1);
+
+                mergedTimestamps.set(norm, newTs);
+                taskTimestamps.set(norm, newTs);
+
+                const nextTasks = {
+                    ...currentState.bruteTasks,
+                    [norm]: nextStateValue
+                };
+                const nextAuto = { ...currentState.bruteAutoCompleted };
+                delete nextAuto[norm];
+
+                const nextSeen = {
+                    ...currentState.bruteSeenTasks,
+                    [norm]: 1
+                };
+
+                const nextState = {
+                    ...currentState,
+                    bruteTasks: nextTasks,
+                    bruteAutoCompleted: nextAuto,
+                    bruteSeenTasks: nextSeen
+                };
+
+                const targetCourses = new Set([getCourseGroupKey(norm)]);
+
+                return persistDomainsToSync(
+                    syncRaw,
+                    nextState,
+                    mergedTimestamps,
+                    { tasks: true, courses: targetCourses, seen: false, settings: false, plagiat: false }
+                ).then(() => {
+                    cachedLogicalState = cloneState(nextState);
+                });
+            });
+        });
     }
 
-    // Public API: Reset / Delete all extension data from storage.sync (and any residual local storage)
     function clearAllStorage() {
         return enqueueOp(() => {
-            return rawGet(syncArea, null).then((syncRaw) => {
-                const allSyncKeys = Object.keys(syncRaw || {});
+            return Promise.all([
+                rawGet(syncArea, null),
+                localArea && localArea !== syncArea ? rawGet(localArea, null) : Promise.resolve({})
+            ]).then(([syncRaw, localRaw]) => {
+                const decodedBeforeClear = decodeSyncItems(syncRaw);
+                const shadowBeforeClear = (localRaw && localRaw[LOCAL_SHADOW_KEY] && localRaw[LOCAL_SHADOW_KEY].tasks)
+                    ? Object.values(localRaw[LOCAL_SHADOW_KEY].tasks).map(e => Number(e && e.t) || 0)
+                    : [];
+                const maxExistingTs = Math.max(
+                    nowEpochSec(),
+                    ...Array.from(taskTimestamps.values()),
+                    ...Array.from((decodedBeforeClear._timestamps || new Map()).values()),
+                    ...shadowBeforeClear,
+                    Number((syncRaw && syncRaw[META_KEY] && syncRaw[META_KEY].r) || 0)
+                );
+                const resetTimestamp = maxExistingTs + 1;
+
+                const syncKeysToRemove = Object.keys(syncRaw || {}).filter(k => k !== META_KEY);
+                const localKeysToRemove = Object.keys(localRaw || {}).filter(
+                    k => k !== ONBOARDING_LOCAL_KEY && k !== LOCAL_SHADOW_KEY
+                );
+
+                taskTimestamps.clear();
+                purgeLegacyLocalStorage();
+
                 const emptyState = {
                     bruteTasks: {},
                     bruteSeenTasks: {},
@@ -693,14 +1349,34 @@
                     bruteDangerTasks: {},
                     brutePartyTriggered: {},
                     plagiatIncident: null,
-                    ...SETTING_DEFAULTS
+                    ...SETTING_DEFAULTS,
+                    _resetAt: resetTimestamp
                 };
-                purgeLegacyLocalStorage();
+
+                const resetShadow = {
+                    tasks: {},
+                    seen: {},
+                    resetAt: resetTimestamp
+                };
+
+                // 1. Write resetAt to local shadow and sync b128_meta FIRST so no listener
+                //    ever sees an empty sync store without the resetAt marker!
                 return Promise.all([
-                    allSyncKeys.length > 0 ? rawRemove(syncArea, allSyncKeys) : Promise.resolve(),
-                    localArea && localArea !== syncArea ? rawClear(localArea) : Promise.resolve()
+                    localArea && localArea !== syncArea
+                        ? rawSet(localArea, { [LOCAL_SHADOW_KEY]: resetShadow })
+                        : Promise.resolve(),
+                    rawSet(syncArea, {
+                        [META_KEY]: { v: DB_VERSION, r: resetTimestamp },
+                        [SETTINGS_KEY]: { ...SETTING_DEFAULTS }
+                    })
                 ]).then(() => {
-                    return persistFullStateToSync(emptyState, 0);
+                    const keysToClean = syncKeysToRemove.filter(k => k !== SETTINGS_KEY);
+                    return Promise.all([
+                        keysToClean.length > 0 ? rawRemove(syncArea, keysToClean) : Promise.resolve(),
+                        localKeysToRemove.length > 0 && localArea && localArea !== syncArea
+                            ? rawRemove(localArea, localKeysToRemove)
+                            : Promise.resolve()
+                    ]);
                 }).then(() => {
                     cachedLogicalState = cloneState(emptyState);
                 });
@@ -708,12 +1384,11 @@
         });
     }
 
-    // Public API: Subscribe to decoded logical changes when storage.sync updates
     const changeListeners = [];
 
     function diffStates(prevState, nextState) {
-        const prev = prevState || {};
-        const next = nextState || {};
+        const prev = stripInternalFields(prevState) || {};
+        const next = stripInternalFields(nextState) || {};
         const allKeys = new Set([...Object.keys(prev), ...Object.keys(next)]);
         const changes = {};
 
@@ -732,26 +1407,33 @@
 
     if (storageNamespace && storageNamespace.onChanged) {
         storageNamespace.onChanged.addListener((rawChanges, area) => {
-            if (area !== 'sync' && area !== 'local') return;
-            const relevant = Object.keys(rawChanges || {}).some(
-                k => k === META_KEY || k.startsWith(CHUNK_PREFIX)
+            if (area !== 'sync') return;
+
+            const incomingObsolete = Object.keys(rawChanges || {}).filter(
+                k => !k.startsWith(KEY_PREFIX) && rawChanges[k] && rawChanges[k].newValue !== undefined
             );
+            if (incomingObsolete.length > 0) {
+                rawRemove(syncArea, incomingObsolete);
+            }
+
+            const relevant = Object.keys(rawChanges || {}).some(k => k.startsWith(KEY_PREFIX));
             if (!relevant) return;
 
             const prevSnapshot = cloneState(cachedLogicalState);
-            rawGet(syncArea, null).then((syncRaw) => {
-                const nextSnapshot = decodeSyncItems(syncRaw);
-                cachedLogicalState = cloneState(nextSnapshot);
-                const logicalChanges = diffStates(prevSnapshot, nextSnapshot);
-                if (Object.keys(logicalChanges).length > 0) {
-                    changeListeners.forEach((listener) => {
-                        try {
-                            listener(logicalChanges, 'sync');
-                        } catch (e) {
-                            console.error('[BRUTE Ext] Error in storage change listener:', e);
-                        }
-                    });
-                }
+            enqueueOp(() => {
+                return loadAndReconcileState().then(({ fullState: nextSnapshot }) => {
+                    cachedLogicalState = cloneState(nextSnapshot);
+                    const logicalChanges = diffStates(prevSnapshot, nextSnapshot);
+                    if (Object.keys(logicalChanges).length > 0) {
+                        changeListeners.forEach((listener) => {
+                            try {
+                                listener(logicalChanges, 'sync');
+                            } catch (e) {
+                                console.error('[BRUTE Ext] Error in storage change listener:', e);
+                            }
+                        });
+                    }
+                });
             });
         });
     }
@@ -763,21 +1445,34 @@
     }
 
     globalScope.BruteSyncStorage = {
+        DB_VERSION,
+        ONBOARDING_LOCAL_KEY,
+        LOCAL_SHADOW_KEY,
         readStorage,
         writeStorage,
+        updateSingleTaskState,
         clearAllStorage,
+        purgePre128Storage,
         subscribeStorageChanges,
         normalizeTaskKey,
-        // Exposed for automated quota & round-trip verification tests
         _internal: {
             serializeTaskMaps,
             deserializeTaskMaps,
+            serializeActiveTasks,
+            serializeActiveTasksByCourse,
+            deserializeActiveTasks,
+            serializeSeenAndDanger,
+            deserializeSeenAndDanger,
             splitIntoChunks,
             packTaskCode,
             unpackTaskCode,
             decodeSyncItems,
             META_KEY,
-            CHUNK_PREFIX,
+            SETTINGS_KEY,
+            PLAGIAT_KEY,
+            COURSE_KEY_PREFIX,
+            TASK_CHUNK_PREFIX,
+            SEEN_CHUNK_PREFIX,
             MAX_CHUNK_CHARS
         }
     };

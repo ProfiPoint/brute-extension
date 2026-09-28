@@ -69,7 +69,7 @@ function updateFooterBranding() {
                     .replace(/©\s*\d{4}/g, `© ${currentYear}`)
                     .replace(
                         /\bBRUTE(?:\+\+)?\s*-\s*Bundle for Reservation, Uploading, Testing and Evaluation/g,
-                        'BRUTE++ Bundle for Reservation, Uploading, Testing and Evaluation'
+                        'BRUTE++ - Bundle for Reservation, Uploading, Testing and Evaluation'
                     )
                     .replace(/^(\s*)BRUTE(\s*(?:\|\s*)?)$/, '$1BRUTE++$2');
 
@@ -1054,9 +1054,17 @@ function syncAllTaskItemsOnPage(tasks) {
 // Tracks tasks evaluated during this page load so re-runs of initTaskPanels on the same page don't alter NEW status
 const processedTaskKeysThisVisit = new Set();
 const sessionPartyTriggeredKeys = new Set();
+let isInitTaskPanelsRunning = false;
+let pendingInitTaskPanelsReRun = false;
 
 function initTaskPanels() {
     if (!storage) return;
+
+    if (isInitTaskPanelsRunning) {
+        pendingInitTaskPanelsReRun = true;
+        return;
+    }
+    isInitTaskPanelsRunning = true;
 
     lastDangerBadgeCount = countCourseDangerBadges();
 
@@ -1159,7 +1167,6 @@ function initTaskPanels() {
 
                 if (!updatedTasks[taskKey]) {
                     updatedTasks[taskKey] = currentState;
-                    hasChanges = true;
                 }
 
                 // Track red X badge (.badge.text-bg-danger.label-right) on course card task rows
@@ -1209,7 +1216,11 @@ function initTaskPanels() {
                             // Synchronize all matching items across all panels/cards on this page
                             syncAllTaskItemsOnPage(currentTasks);
 
-                            writeStorage({ bruteTasks: currentTasks });
+                            if (typeof storage.updateSingleTaskState === 'function') {
+                                storage.updateSingleTaskState(targetKey, nextState);
+                            } else {
+                                writeStorage({ bruteTasks: currentTasks });
+                            }
                         });
                     });
 
@@ -1293,7 +1304,6 @@ function initTaskPanels() {
 
                 if (!updatedTasks[taskKey]) {
                     updatedTasks[taskKey] = 'default';
-                    hasChanges = true;
                 }
 
                 const qualifiesForParty = doesTaskQualifyForParty(detail, cachedPartyModeOnMinScore);
@@ -1386,6 +1396,12 @@ function initTaskPanels() {
         console.log("[BRUTE Ext] Task injection complete.");
     }).catch(err => {
         console.error("[BRUTE Ext] Storage error:", err);
+    }).finally(() => {
+        isInitTaskPanelsRunning = false;
+        if (pendingInitTaskPanelsReRun) {
+            pendingInitTaskPanelsReRun = false;
+            initTaskPanels();
+        }
     });
 }
 

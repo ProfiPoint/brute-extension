@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "FEL CTU BRUTE Deadline Manager",
-  "version": "1.26",
+  "version": "1.29",
   "description": "Adds task management, plagiat tracking dashboard, and optional Classic UI style to FEL CTU BRUTE.",
   "icons": {
     "16": "icons/brute16.png",
@@ -18,16 +18,26 @@
       "128": "icons/brute128.png"
     }
   },
+  "background": {
+    "service_worker": "background.js",
+    "scripts": ["storage.js", "background.js"]
+  },
   "permissions": [
     "storage"
+  ],
+  "host_permissions": [
+    "https://brute.fel.cvut.cz/*",
+    "https://cw.felk.cvut.cz/*",
+    "https://cw.fel.cvut.cz/*",
+    "https://brute.felk.cvut.cz/*"
   ],
   "content_scripts": [
     {
       "matches": [
-        "https://brute.fel.cvut.cz/brute/student/*",
-        "https://cw.felk.cvut.cz/brute/student/*",
-        "https://cw.fel.cvut.cz/brute/student/*",
-        "https://brute.felk.cvut.cz/brute/student/*"
+        "https://brute.fel.cvut.cz/*",
+        "https://cw.felk.cvut.cz/*",
+        "https://cw.fel.cvut.cz/*",
+        "https://brute.felk.cvut.cz/*"
       ],
       "css": ["styles.css"],
       "js": ["storage.js", "content.js"],

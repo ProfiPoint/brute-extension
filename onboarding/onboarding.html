@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FEL CTU BRUTE++ Helper — Setup &amp; Overview</title>
+  <link rel="stylesheet" href="onboarding.css">
+</head>
+<body>
+  <div class="container">
+    <!-- Compact Top Bar -->
+    <header class="top-bar">
+      <div class="top-bar-left">
+        <img src="../icons/brute48.png" alt="BRUTE++" class="logo">
+        <div>
+          <h1>FEL CTU BRUTE++ Deadline Manager <span id="onboarding-version" class="ver-tag">v1.29</span></h1>
+          <div class="warning-line">
+            ⚠️ <strong>Notice:</strong> Data up to September 28th 2026 was cleared. All tasks &amp; settings
+            auto-sync across devices.
+          </div>
+        </div>
+      </div>
+      <div class="top-bar-right">
+        <a href="https://github.com/ProfiPoint/brute-extension" target="_blank" rel="noopener noreferrer" class="btn btn-github">
+          GitHub (Open Source) ↗
+        </a>
+        <a href="https://brute.fel.cvut.cz/brute/student/index.php" target="_blank" rel="noopener noreferrer" class="btn btn-primary">
+          Open BRUTE ↗
+        </a>
+        <button type="button" id="btn-close-tab" class="btn">Close</button>
+      </div>
+    </header>
+
+    <!-- Main 2-Column Single-Page Layout -->
+    <main class="main-grid">
+      <!-- LEFT COLUMN: PERMISSIONS & STATUS -->
+      <section class="panel">
+        <div class="panel-header">
+          <h2>1. Permissions &amp; Status</h2>
+          <span id="perm-badge" class="status-badge status-pending">⚠️ PERMISSIONS REQUIRED</span>
+        </div>
+        <div class="panel-body">
+          <div class="status-box" id="quick-grant-box">
+            <div class="status-text">
+              <strong id="perm-status-title">⚠️ ACTION REQUIRED: Enable BRUTE Site Permissions!</strong>
+              <span id="perm-status-subtitle">Required: brute.fel.cvut.cz, cw.felk.cvut.cz, cw.fel.cvut.cz, brute.felk.cvut.cz</span>
+            </div>
+            <div class="status-actions">
+              <button type="button" id="btn-grant-permissions" class="btn btn-grant-urgent">
+                ⚠️ Grant Permissions
+              </button>
+              <button type="button" id="btn-open-ext-tab" class="btn">
+                Open Extension Settings ↗
+              </button>
+            </div>
+          </div>
+
+          <!-- Chrome Instructions (shown only on Chrome / Chromium) -->
+          <div id="guide-chrome" class="browser-guide">
+            <div class="guide-title">
+              <strong>Google Chrome — Enable Site Access:</strong>
+            </div>
+            <ul class="bullet-list">
+              <li>Click <strong>Grant Permissions</strong> above, or click <strong>Open Extension Settings ↗</strong>.</li>
+              <li>Scroll to <strong>Site access</strong>.</li>
+              <li>Enable <strong>"Automatically allow access on the following sites"</strong> (all 4 BRUTE URLs ON):</li>
+            </ul>
+            <div class="img-box">
+              <img src="../assets/chrome.png" alt="Chrome Permissions">
+            </div>
+          </div>
+
+          <!-- Firefox Instructions (shown only on Mozilla Firefox) -->
+          <div id="guide-firefox" class="browser-guide" style="display: none;">
+            <div class="guide-title">
+              <strong>Mozilla Firefox — Enable Permissions:</strong>
+            </div>
+            <ul class="bullet-list">
+              <li>Click <strong>Grant Permissions</strong> above (or open <code>about:addons</code> → <strong>FEL CTU BRUTE Deadline Manager</strong>).</li>
+              <li>Open the <strong>Permissions and data</strong> tab and toggle <strong>ON</strong> all 4 BRUTE domain switches:</li>
+              <li><strong>Firefox Sync Note:</strong> Firefox syncs add-ons every ~5–15 min (or click <em>Firefox Account → Sync Now</em>). Local Auto-Heal backup automatically merges pre-sync edits across devices.</li>
+            </ul>
+            <div class="img-box">
+              <img src="../assets/firefox-permissions.png" alt="Firefox Permissions">
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- RIGHT COLUMN: FEATURE SHOWCASE (PRESENTATION BULLETS) -->
+      <section class="panel">
+        <div class="panel-header">
+          <h2>2. Features Overview</h2>
+          <span class="status-badge status-ok">Auto-Sync Active</span>
+        </div>
+        <div class="panel-body">
+          <ul class="feature-slides">
+            <li>
+              <strong>⚙️ Manual Task States (Gear Icon in Header)</strong>
+              <ul>
+                <li>Click <strong>⚙️</strong> on any Course card or <em>Upcoming deadlines</em> to toggle task controls.</li>
+                <li>States:
+                  <span class="tag tag-done">✅ Done</span>
+                  <span class="tag tag-todo">⭐ To-Do</span>
+                  <span class="tag tag-hl">🔎 Highlight</span>
+                  <span class="tag tag-cancel">❌ Cancel</span>
+                  <span class="tag tag-def">⚙️ Default</span>
+                </li>
+              </ul>
+            </li>
+
+            <li>
+              <strong>⚡ Automatic Completion Detection</strong>
+              <ul>
+                <li><strong>Course Summary:</strong> Auto-marks <span class="tag tag-done">✅ Done</span> when max points (or min required score) is reached.</li>
+                <li><strong>Red ✕ Removal:</strong> Auto-marks <span class="tag tag-done">✅ Done</span> when a task's red <code>✕</code> (<em>Not accepted yet</em>) disappears.</li>
+              </ul>
+            </li>
+
+            <li>
+              <strong>🎉 Party Mode Celebration</strong>
+              <ul>
+                <li>Confetti &amp; neon celebration when a task auto-completes in Course Summary (configurable in popup).</li>
+              </ul>
+            </li>
+
+            <li>
+              <strong>🆕 NEW Task Badges &amp; Notifications</strong>
+              <ul>
+                <li>Highlights newly published assignments/exams with a <strong>NEW</strong> badge &amp; toast on visit.</li>
+              </ul>
+            </li>
+
+            <li>
+              <strong>🎨 Classic BRUTE UI &amp; Layout Options (Toolbar Popup)</strong>
+              <ul>
+                <li>Toggle <strong>Classic BRUTE UI (Old Style)</strong>.</li>
+                <li>Move <strong>Course summary table to bottom</strong> of course pages.</li>
+                <li>Auto-hide navbar plagiat banner until a new incident appears.</li>
+              </ul>
+            </li>
+
+            <li>
+              <strong>☁️ Automatic Browser Sync &amp; Local Auto-Heal</strong>
+              <ul>
+                <li>Tasks and settings sync automatically via your browser account (with local shadow backup so pre-sync edits on a new device auto-merge without data loss).</li>
+              </ul>
+            </li>
+          </ul>
+
+          <div class="opensource-box">
+            <div>
+              <strong>💻 Open Source Project (GitHub)</strong>
+              <p>Want to contribute, report a bug, fork, or submit a Pull Request?</p>
+            </div>
+            <a href="https://github.com/ProfiPoint/brute-extension" target="_blank" rel="noopener noreferrer" class="gh-link">
+              github.com/ProfiPoint/brute-extension ↗
+            </a>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="bottom-bar">
+      <span>This page opens automatically <strong>only once</strong> after update. You can reopen it anytime from the
+        extension popup.</span> ProfiPoint 2026
+    </footer>
+  </div>
+
+  <script src="../storage.js"></script>
+  <script src="onboarding.js"></script>
+</body>
+</html>

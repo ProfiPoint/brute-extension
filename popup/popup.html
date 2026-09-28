@@ -17,7 +17,12 @@
           <p class="brand-subtitle">FEL CTU Task &amp; Deadline Helper</p>
         </div>
       </div>
-      <span id="ext-version" class="version-badge">v1.2</span>
+      <div class="header-right">
+        <a href="https://brute.fel.cvut.cz/brute/student/index.php" target="_blank" rel="noopener noreferrer" id="btn-open-brute" class="btn-open-brute-top" title="Open FEL CTU BRUTE in a new tab">
+          Open BRUTE ↗
+        </a>
+        <span id="ext-version" class="version-badge">v1.29</span>
+      </div>
     </header>
 
     <!-- 1. Tracked Tasks Overview Section (First) -->
@@ -64,34 +69,7 @@
       </div>
     </section>
 
-    <!-- 2. Plagiat Status Section (Second) -->
-    <section class="card plagiat-card" id="plagiat-card">
-      <div class="card-header">
-        <span class="card-title">Plagiat Incident Monitor</span>
-        <span id="plagiat-badge" class="badge badge-clean">Clean</span>
-      </div>
-      <div class="card-body">
-        <div id="plagiat-clean-view" class="status-box status-clean">
-          <span class="status-icon">🛡️</span>
-          <div class="status-text">
-            <strong>No Incidents Detected</strong>
-            <p>Status: Normal.</p>
-          </div>
-        </div>
-
-        <div id="plagiat-incident-view" class="status-box status-warning hidden">
-          <div class="warning-header">
-            <span class="warning-icon">⚠️</span>
-            <div class="warning-meta">
-              <strong id="plagiat-title">Plagiat incident detected</strong>
-              <p>Plagiat incident has been automatically hidden. Rip. At least you don't have to be forced to stare at it anymore...</p>
-            </div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- 3. Settings & Data Management Section -->
+    <!-- 2. Settings Section (Second) -->
     <section class="card settings-card">
       <div class="card-header">
         <span class="card-title">Settings &amp; Data</span>
@@ -245,15 +223,54 @@
             </label>
           </div>
         </div>
+      </div>
+    </section>
 
-        <!-- Category 4: Debug & Data Management -->
+    <!-- 3. Plagiat Incident Monitor Section (Third) -->
+    <section class="card plagiat-card" id="plagiat-card">
+      <div class="card-header">
+        <span class="card-title">Plagiat Incident Monitor</span>
+        <span id="plagiat-badge" class="badge badge-clean">Clean</span>
+      </div>
+      <div class="card-body">
+        <div id="plagiat-clean-view" class="status-box status-clean">
+          <span class="status-icon">🛡️</span>
+          <div class="status-text">
+            <strong>No Incidents Detected</strong>
+            <p>Status: Normal.</p>
+          </div>
+        </div>
+
+        <div id="plagiat-incident-view" class="status-box status-warning hidden">
+          <div class="warning-header">
+            <span class="warning-icon">⚠️</span>
+            <div class="warning-meta">
+              <strong id="plagiat-title">Plagiat incident detected</strong>
+              <p>Plagiat incident has been automatically hidden. Rip. At least you don't have to be forced to stare at it anymore...</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 4. Debug & Data Management Section (Fourth) -->
+    <section class="card settings-card">
+      <div class="card-header">
+        <span class="card-title">🛠️ Debug &amp; Data Management</span>
+      </div>
+      <div class="card-body settings-body">
         <div class="settings-group">
-          <div class="settings-group-title">🛠️ Debug &amp; Data Management</div>
-
           <!-- Debug Simulate Party Mode button -->
           <div class="debug-actions">
             <button id="btn-simulate-party" class="btn btn-party btn-block" title="Simulates switching a random task in Course summary from XX to its maximum score">
               🎉 Simulate Party - Task Completed
+            </button>
+          </div>
+
+          <!-- Open Setup & Permissions Guide button -->
+          <div class="debug-actions" style="margin-top: 6px;">
+            <button id="btn-open-guide" class="btn btn-secondary btn-block" title="Open the Onboarding, Permissions &amp; Overview page in a new tab">
+              📖 Open Onboarding &amp; Permissions Page
             </button>
           </div>
 

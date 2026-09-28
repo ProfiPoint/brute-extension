@@ -54,6 +54,31 @@ body {
   color: #718096;
 }
 
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.btn-open-brute-top {
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  background: #2563eb;
+  color: #ffffff;
+  padding: 3px 9px;
+  border-radius: 12px;
+  border: 1px solid #1d4ed8;
+  cursor: pointer;
+  text-decoration: none;
+  transition: background 0.15s ease;
+  white-space: nowrap;
+}
+
+.btn-open-brute-top:hover {
+  background: #1d4ed8;
+}
+
 .version-badge {
   font-size: 11px;
   font-weight: 600;

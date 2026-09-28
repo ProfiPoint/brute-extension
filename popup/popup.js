@@ -378,6 +378,27 @@ function initPopup() {
     });
   }
 
+  // Open Onboarding / Permissions & Tutorial Guide Button
+  const openOnboardingPage = () => {
+    const runtime = (typeof browser !== 'undefined' && browser.runtime)
+      ? browser.runtime
+      : (typeof chrome !== 'undefined' && chrome.runtime ? chrome.runtime : null);
+    const tabs = (typeof browser !== 'undefined' && browser.tabs)
+      ? browser.tabs
+      : (typeof chrome !== 'undefined' && chrome.tabs ? chrome.tabs : null);
+    const url = runtime && runtime.getURL ? runtime.getURL('onboarding/onboarding.html') : '../onboarding/onboarding.html';
+    if (tabs && tabs.create) {
+      tabs.create({ url, active: true });
+    } else {
+      window.open(url, '_blank');
+    }
+  };
+
+  const btnOpenGuide = getEl('btn-open-guide');
+  if (btnOpenGuide) {
+    btnOpenGuide.addEventListener('click', openOnboardingPage);
+  }
+
   // Delete Confirmation Flow
   const btnDeleteAllInit = getEl('btn-delete-all-init');
   const deleteInitialView = getEl('delete-initial-view');

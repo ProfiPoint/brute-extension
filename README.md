@@ -4,6 +4,11 @@ Browser extension for the FEL CTU BRUTE student portal (`brute.fel.cvut.cz` and 
 
 > **Warning:** This project is vibecoded. Expect pragmatic DOM selectors, big functions, and quick fixes rather than textbook architecture. Test changes on real BRUTE pages before shipping.
 
+## 
+[Chrome Addon](https://chromewebstore.google.com/detail/fel-ctu-brute-deadline-ma/encfjfpcjeldeejmokgojbblfpgbkobc)
+
+[Firefox Addon](https://addons.mozilla.org/en-US/firefox/addon/fel-ctu-brute-deadline-manager/)
+
 ## Project Structure
 
 - `manifest.json` - Manifest V3 config for Chrome and Firefox.
